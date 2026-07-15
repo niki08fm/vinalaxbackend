@@ -173,6 +173,66 @@ app.delete('/api/enquiries/:id', verifyToken, async (req, res) => {
   }
 });
 
+// ── 4b. CLIENT PORTAL (Company / Employee) ──
+// This is a THIN PROXY, not a second data model: companies and employees, and
+// all their payroll/payslip data, live in the separate HR system's MySQL
+// database and are managed from its admin panel. This backend never stores or
+// duplicates that data — every client-portal route below just forwards the
+// caller's request (and Bearer token) to the HR system's API and relays back
+// its response byte-for-byte, whether that's JSON, a PDF, an Excel file, or a
+// ZIP. Kept fully separate from the marketing-site Admin/Enquiry routes above.
+const HR_API_BASE_URL = process.env.HR_API_BASE_URL || 'http://localhost:5001/api';
+
+async function proxyToHR(req, res, hrPath) {
+  const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
+  try {
+    const upstream = await fetch(`${HR_API_BASE_URL}${hrPath}${qs}`, {
+      method: req.method,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(req.headers.authorization ? { Authorization: req.headers.authorization } : {})
+      },
+      body: ['POST', 'PUT', 'DELETE'].includes(req.method) ? JSON.stringify(req.body || {}) : undefined
+    });
+
+    const contentType = upstream.headers.get('content-type') || '';
+    const disposition = upstream.headers.get('content-disposition');
+    if (disposition) res.setHeader('Content-Disposition', disposition);
+    res.status(upstream.status);
+
+    if (contentType.includes('application/json')) {
+      res.json(await upstream.json());
+    } else {
+      res.setHeader('Content-Type', contentType || 'application/octet-stream');
+      res.send(Buffer.from(await upstream.arrayBuffer()));
+    }
+  } catch (error) {
+    console.error('[proxyToHR] Could not reach HR system:', error.message);
+    res.status(502).json({ success: false, message: 'Could not reach the HR system. Please try again shortly.' });
+  }
+}
+
+// Login (company or employee — the HR system tells us which via the returned user.role)
+app.post('/api/client/login', (req, res) => proxyToHR(req, res, '/auth/login'));
+app.get('/api/client/me', (req, res) => proxyToHR(req, res, '/auth/me'));
+app.put('/api/client/change-password', (req, res) => proxyToHR(req, res, '/auth/change-password'));
+
+// Company self-service (role = COMPANY)
+app.get('/api/client/company/payrolls', (req, res) => proxyToHR(req, res, '/company-portal/payrolls'));
+app.get('/api/client/company/payrolls/:runId/excel', (req, res) => proxyToHR(req, res, `/company-portal/payrolls/${req.params.runId}/excel`));
+app.get('/api/client/company/payrolls/:runId', (req, res) => proxyToHR(req, res, `/company-portal/payrolls/${req.params.runId}`));
+app.get('/api/client/company/payslips/download-zip', (req, res) => proxyToHR(req, res, '/company-portal/payslips/download-zip'));
+app.get('/api/client/company/payslips/:payslipId/pdf', (req, res) => proxyToHR(req, res, `/company-portal/payslips/${req.params.payslipId}/pdf`));
+app.get('/api/client/company/payslips/:payslipId', (req, res) => proxyToHR(req, res, `/company-portal/payslips/${req.params.payslipId}`));
+app.get('/api/client/company/payslips', (req, res) => proxyToHR(req, res, '/company-portal/payslips'));
+app.get('/api/client/company/reports/pf-ecr', (req, res) => proxyToHR(req, res, '/company-portal/reports/pf-ecr'));
+app.get('/api/client/company/reports/esi', (req, res) => proxyToHR(req, res, '/company-portal/reports/esi'));
+app.get('/api/client/company/reports/bank', (req, res) => proxyToHR(req, res, '/company-portal/reports/bank'));
+
+// Employee self-service (role = EMPLOYEE) — self-scoped by the HR system from the JWT
+app.get('/api/client/employee/payslips/:payslipId/pdf', (req, res) => proxyToHR(req, res, `/payslips/my/${req.params.payslipId}/pdf`));
+app.get('/api/client/employee/payslips', (req, res) => proxyToHR(req, res, '/payslips/my'));
+
 // ── 5. START ACTIVE ENGINE LISTENER WITH AUTOMATIC PROFILE SEEDING ──
 const PORT = process.env.PORT || 5001;
 
