@@ -12,8 +12,8 @@ Browser ─► vinalaxhrsolutions.com (website) ─► https://api.vinalaxhrsolu
                                                                                               127.0.0.1:<HR port> HR backend "server" (PM2)
 ```
 
-Render keeps running during this step. The live website does not change until
-step 2, so nothing breaks while you set this up.
+Render is being retired. The website's enquiry form and admin page may be offline
+until the website frontend is pointed at this server (step 2).
 
 ## 1.1 Before you start (AWS console and DNS)
 
@@ -76,14 +76,9 @@ sudo ss -ltnp | grep -E ':(80|443) '
 cd ~
 ```
 
-Until the branch is merged into `main`, clone the branch that contains the AWS changes:
-
 ```bash
-git clone -b claude/stoic-ptolemy-3cjt4n https://github.com/niki08fm/vinalaxbackend.git
+git clone https://github.com/niki08fm/vinalaxbackend.git
 ```
-
-After it is merged (in step 2), switch the server to `main` with
-`git switch main && git pull --ff-only origin main`.
 
 ```bash
 cd ~/vinalaxbackend && npm ci --omit=dev
@@ -109,10 +104,6 @@ nano .env
 | `ADMIN_EMAIL` | `admin@vinalax.com` |
 | `ADMIN_PASSWORD` | a strong new website-admin password (10+ characters) |
 | `ADMIN_RESET_PASSWORD` | `true` **for the first start only** (replaces the old `admin123`) |
-
-Note: changing the Atlas password also breaks the Render copy, unless you update
-`MONGO_URI` on Render as well. Update it there too so the live site keeps working
-until step 2.
 
 ## 1.5 Start with PM2
 
@@ -230,7 +221,7 @@ sudo certbot renew --dry-run
 3. The HR software still works as before at `vinalaxhrsoftware.vercel.app`.
 
 Step 1 is done when all three pass. **Step 2** points the website frontend at this
-address, and only then is Render switched off.
+address. Render can then be deleted.
 
 ## Updating later
 
