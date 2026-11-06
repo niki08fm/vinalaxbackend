@@ -76,9 +76,14 @@ sudo ss -ltnp | grep -E ':(80|443) '
 cd ~
 ```
 
+Until the branch is merged into `main`, clone the branch that contains the AWS changes:
+
 ```bash
-git clone https://github.com/niki08fm/vinalaxbackend.git
+git clone -b claude/stoic-ptolemy-3cjt4n https://github.com/niki08fm/vinalaxbackend.git
 ```
+
+After it is merged (in step 2), switch the server to `main` with
+`git switch main && git pull --ff-only origin main`.
 
 ```bash
 cd ~/vinalaxbackend && npm ci --omit=dev
