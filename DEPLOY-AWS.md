@@ -1,24 +1,45 @@
-# Deploy the website backend to AWS EC2 (next to the HR software)
+# Step 1 — Website backend on AWS EC2 at https://api.vinalaxhrsolutions.com
 
 The website backend runs on the **same EC2 instance** as the HR software
-(`3.109.84.186`) and is managed by PM2, just like the HR backend `server`.
+(`3.109.84.186`), managed by PM2 next to the HR backend `server`. nginx gives it
+its own HTTPS address, `api.vinalaxhrsolutions.com`. The HR software's existing
+setup is not changed.
 
 ```
-Browser ──► Vercel (website)  /site-api/*  ──► EC2 :80 nginx /site-api/ ──► 127.0.0.1:5002  website-api (PM2)
-                                                                               │  /api/client/*
-                                                                               ▼
-                                                                         127.0.0.1:5001  HR backend "server" (PM2)
+Browser ─► vinalaxhrsolutions.com (website) ─► https://api.vinalaxhrsolutions.com ─► nginx :443 ─► 127.0.0.1:5002 website-api (PM2)
+                                                                                                          │ /api/client/*
+                                                                                                          ▼
+                                                                                              127.0.0.1:<HR port> HR backend "server" (PM2)
 ```
 
-- The website calls `/site-api/...` on its own domain, and Vercel forwards it to EC2.
-  This mirrors the HR frontend, which forwards `/api/...` the same way. The browser
-  only ever talks HTTPS to Vercel, so there are no mixed-content or CORS problems.
-- The HR backend already owns `/api/*` on port 80, so the website backend gets its own
-  prefix `/site-api/`. **No new security-group port is opened.**
-- Client portal requests go from the website backend to the HR backend over
-  `127.0.0.1`, inside the server.
+Render keeps running during this step. The live website does not change until
+step 2, so nothing breaks while you set this up.
 
-## 1. Connect and check what is running
+## 1.1 Before you start (AWS console and DNS)
+
+1. **Elastic IP:** go to AWS → EC2 → **Elastic IPs**. Check that `3.109.84.186` is listed and
+   associated with the instance. If it is not, the IP changes when the instance restarts.
+   Allocate an Elastic IP and associate it first, then use that IP below and update the
+   HR frontend's `vercel.json`.
+2. **Security group:** go to EC2 → instance → **Security** → security group → **Inbound rules**.
+   Make sure there are rules for **HTTP 80** and **HTTPS 443** from `0.0.0.0/0`. Port 443 is
+   probably new, and certbot needs port 80.
+3. **DNS:** where vinalaxhrsolutions.com is managed, add:
+
+   | Type | Name | Value | Notes |
+   |---|---|---|---|
+   | A | `api` | `3.109.84.186` | On Cloudflare set **DNS only** (grey cloud), at least until the certificate is issued |
+
+   Then check from any computer (allow a few minutes):
+
+   ```bash
+   nslookup api.vinalaxhrsolutions.com
+   ```
+
+   It must answer `3.109.84.186` before you go to 1.6.
+4. **MongoDB Atlas:** go to **Network Access** → Add IP Address → `3.109.84.186`.
+
+## 1.2 Connect and check
 
 ```bash
 ssh -i /path/to/your-key.pem ubuntu@3.109.84.186
@@ -32,48 +53,63 @@ pm2 list
 node --version
 ```
 
-Node 20 or newer is required. The HR backend already needs 22, so this is normally fine.
-
-Find the HR backend's port; you need it for `HR_API_BASE_URL`. Run this from the HR
-software's `backend` folder (`pm2 describe server` shows the folder):
+You need Node 20 or newer. Next, find the HR backend's port, which `HR_API_BASE_URL` needs.
+`pm2 describe server` shows its folder. `cd` into that `backend` folder, then run:
 
 ```bash
 node -e "require('dotenv').config(); console.log(process.env.PORT || 5000)"
 ```
 
-## 2. Get the code
+Next, see what serves port 80:
+
+```bash
+sudo ss -ltnp | grep -E ':(80|443) '
+```
+
+- If it shows **nginx**, continue.
+- If nothing is listening, install nginx: `sudo apt update && sudo apt install -y nginx`.
+- If it shows **anything else** (for example `node`), stop here and send me the output.
+
+## 1.3 Get the code
 
 ```bash
 cd ~
-git clone https://github.com/niki08fm/vinalaxbackend.git
-cd vinalaxbackend
-npm ci --omit=dev
 ```
 
-## 3. Create `.env`
+```bash
+git clone https://github.com/niki08fm/vinalaxbackend.git
+```
+
+```bash
+cd ~/vinalaxbackend && npm ci --omit=dev
+```
+
+## 1.4 Create `.env`
 
 ```bash
 cp .env.example .env
+```
+
+```bash
 nano .env
 ```
 
-Fill in:
-
 | Name | Value |
 |---|---|
-| `PORT` | `5002` (must not clash with the HR backend) |
-| `MONGO_URI` | your MongoDB Atlas URI — **use a new password** (the old one was committed to Git) |
-| `JWT_SECRET` | a new long random value |
-| `HR_API_BASE_URL` | `http://127.0.0.1:<HR port from step 1>/api` |
-| `CORS_ORIGINS` | your website domain(s) |
-| `ADMIN_PASSWORD` | a strong website-admin password (10+ chars) |
+| `PORT` | `5002` |
+| `MONGO_URI` | the Atlas URI, **with a new database password** (the old one was public in Git; change it in Atlas → Database Access) |
+| `JWT_SECRET` | a new value, from `node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"` |
+| `HR_API_BASE_URL` | `http://127.0.0.1:<HR port from 1.2>/api` |
+| `CORS_ORIGINS` | `https://vinalaxhrsolutions.com,https://www.vinalaxhrsolutions.com` plus the current website `*.vercel.app` address while testing |
+| `ADMIN_EMAIL` | `admin@vinalax.com` |
+| `ADMIN_PASSWORD` | a strong new website-admin password (10+ characters) |
+| `ADMIN_RESET_PASSWORD` | `true` **for the first start only** (replaces the old `admin123`) |
 
-MongoDB Atlas: in **Network Access**, allow the EC2 public IP `3.109.84.186`.
+Note: changing the Atlas password also breaks the Render copy, unless you update
+`MONGO_URI` on Render as well. Update it there too so the live site keeps working
+until step 2.
 
-If a website admin already exists in MongoDB, set `ADMIN_RESET_PASSWORD=true` for the
-first start so the old `admin123` password is replaced. Remove that line again afterwards.
-
-## 4. Start with PM2
+## 1.5 Start with PM2
 
 ```bash
 pm2 start ecosystem.config.cjs
@@ -83,90 +119,132 @@ pm2 start ecosystem.config.cjs
 pm2 logs website-api --lines 30 --nostream
 ```
 
+Look for "running on port 5002" and "Website admin … password reset". Then:
+
 ```bash
-curl --fail http://127.0.0.1:5002/api/health
+curl http://127.0.0.1:5002/api/health
 ```
 
-The response should show `"db":"connected"`. Then save the PM2 list so it survives reboots:
+It should show `"db":"connected"`. If it shows `disconnected`, check the Atlas Network Access
+and `MONGO_URI`. Now remove the one-time reset line and restart:
+
+```bash
+sed -i '/^ADMIN_RESET_PASSWORD=/d' .env && pm2 restart website-api --update-env
+```
 
 ```bash
 pm2 save
 ```
 
-## 5. Add the `/site-api/` route to the existing web server on port 80
-
-Find out which server listens on port 80:
-
-```bash
-sudo ss -ltnp | grep ':80 '
-```
-
-**If it is nginx** (most likely), find the file with the existing `location /api/` block:
+Check that PM2 starts again after a reboot (it is probably already set up for the HR
+backend). If `pm2 startup` prints a `sudo env PATH=...` command, run that command:
 
 ```bash
-sudo grep -rn "location /api" /etc/nginx/
+pm2 startup
 ```
 
-In that same `server { ... }` block, add:
+## 1.6 nginx site for api.vinalaxhrsolutions.com
 
-```nginx
-    location /site-api/ {
-        proxy_pass http://127.0.0.1:5002/api/;
+This creates a **new, separate** file. The HR software's nginx file is not touched.
+
+```bash
+sudo tee /etc/nginx/sites-available/website-api >/dev/null <<'EOF'
+server {
+    listen 80;
+    server_name api.vinalaxhrsolutions.com;
+
+    client_max_body_size 10m;
+
+    location / {
+        proxy_pass http://127.0.0.1:5002;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
         proxy_read_timeout 120s;
     }
+}
+EOF
+```
+
+```bash
+sudo ln -s /etc/nginx/sites-available/website-api /etc/nginx/sites-enabled/website-api
 ```
 
 ```bash
 sudo nginx -t
 ```
 
+Continue only if it says `syntax is ok` and `test is successful`. Then:
+
 ```bash
 sudo systemctl reload nginx
 ```
 
 ```bash
-curl --fail http://3.109.84.186/site-api/health
+curl http://api.vinalaxhrsolutions.com/api/health
 ```
 
-Do not change the existing `/api/` block — the HR software keeps using it.
+Then check that the HR software still answers as before:
 
-## 6. Switch the website frontend to AWS
+```bash
+curl http://3.109.84.186/api/health
+```
 
-The `vinalaxfrontend` repo's `vercel.json` forwards `/site-api/*` to
-`http://3.109.84.186/site-api/*`. Merge that change and let Vercel redeploy **after**
-step 5 works. Until then, the live website keeps using Render.
+## 1.7 HTTPS certificate (free, auto-renewing)
 
-Check on the live site:
-1. Submit an enquiry on the home page. It should then appear in the website admin dashboard.
-2. Open **Client Login** and sign in with a company login. Payrolls and payslips should load.
-3. Sign in with an employee login. Their payslips should load and download.
+```bash
+sudo apt install -y certbot python3-certbot-nginx
+```
 
-Once everything works on AWS, the Render service can be suspended.
+```bash
+sudo certbot --nginx -d api.vinalaxhrsolutions.com
+```
 
-## How clients get their login
+Give an email address, accept the terms, and choose **redirect HTTP to HTTPS** if it asks.
 
-Client logins are created in the **HR software** (not the website):
+```bash
+curl https://api.vinalaxhrsolutions.com/api/health
+```
 
-- **Company login:** HR software → **Employee Access** (sidebar) → **Company logins** tab →
-  **+ Create company login** → choose the company, enter the email and a password (8+ characters).
-- **Employee login:** HR software → **Employee Access** → **Employee logins** tab → grant access
-  to an employee (or bulk-grant a whole company), entering the email and password.
+```bash
+sudo certbot renew --dry-run
+```
 
-Send that email and password to the client. They open the website, click
-**Client Login** and sign in. Companies see their payrolls, payslips and PF/ESI/bank
-reports. Employees see only their own payslips. Deactivating or changing the login in
-**Employee Access** takes effect immediately. HR admin and manager accounts are refused on the
-website portal.
+## 1.8 Final checks (from your own computer)
+
+1. Open `https://api.vinalaxhrsolutions.com/api/health` in a browser. It should show a padlock and `"db":"connected"`.
+2. Test a client login with a real company login created in HR software → Employee Access:
+
+   ```bash
+   curl -X POST https://api.vinalaxhrsolutions.com/api/client/login -H "Content-Type: application/json" -d '{"email":"COMPANY_EMAIL","password":"COMPANY_PASSWORD"}'
+   ```
+
+   It should return `"success":true` with a token. An HR admin account must return a 403 message instead.
+3. The HR software still works as before at `vinalaxhrsoftware.vercel.app`.
+
+Step 1 is done when all three pass. **Step 2** points the website frontend at this
+address, and only then is Render switched off.
 
 ## Updating later
 
 ```bash
-cd ~/vinalaxbackend
-git pull --ff-only origin main
-npm ci --omit=dev
-pm2 restart website-api --update-env
+cd ~/vinalaxbackend && git pull --ff-only origin main && npm ci --omit=dev && pm2 restart website-api --update-env
 ```
+
+## Troubleshooting
+
+- **certbot fails:** check that DNS answers `3.109.84.186` (on Cloudflare, use DNS only) and that port 80 is open in the security group.
+- **`502 Bad Gateway`:** check `pm2 list` (is `website-api` online?) and `pm2 logs website-api`.
+- **Client login says it "could not reach the HR system":** `HR_API_BASE_URL` has the wrong port. Check it with `curl http://127.0.0.1:<port>/api/health`.
+
+## How clients get their login
+
+Client logins are created in the HR software → **Employee Access**:
+
+- **Company logins** tab → **+ Create company login**.
+- **Employee logins** tab → grant access.
+
+The same email and password work on the website's Client Login and directly in the HR
+software.
