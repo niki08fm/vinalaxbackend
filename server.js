@@ -210,7 +210,14 @@ app.post('/api/client/login', async (req, res) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req.body || {})
     });
-    const data = await upstream.json().catch(() => ({ success: false, message: 'Unexpected response from the HR system.' }));
+    const raw = await upstream.text();
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      console.error(`[client login] HR system returned non-JSON (status ${upstream.status}, type ${upstream.headers.get('content-type')}, body type ${typeof req.body}): ${raw.slice(0, 300)}`);
+      return res.status(502).json({ success: false, message: 'Unexpected response from the HR system.' });
+    }
     if (upstream.ok && data.user && !CLIENT_ROLES.includes(data.user.role)) {
       return res.status(403).json({ success: false, message: 'This account cannot use the client portal. Please sign in to the HR software instead.' });
     }
