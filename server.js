@@ -10,8 +10,12 @@ dotenv.config();
 const app = express();
 
 // Middleware rules
+// CORS_ORIGINS: comma-separated list of allowed site origins, e.g.
+// "https://www.vinalaxhrsolutions.com,https://vinalaxhrsolutions.com".
+// When unset every origin is allowed (previous behaviour, handy for local dev).
+const corsOrigins = (process.env.CORS_ORIGINS || '').split(',').map(o => o.trim()).filter(Boolean);
 app.use(cors({
-  origin: true, // Explicitly allows your Vite React frontend access
+  origin: corsOrigins.length ? corsOrigins : true,
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE"],
   allowedHeaders: ["Content-Type", "Authorization"]
@@ -67,26 +71,9 @@ const verifyToken = (req, res, next) => {
 
 // ── 4. BACKEND API ROUTE DEFINITIONS ──
 
-// SETUP ACCOUNT ROUTE (One-time call to seed initial encrypted login details manual check)
-app.post('/api/auth/setup-admin', async (req, res) => {
-  try {
-    const checkAdmin = await Admin.findOne({ email: 'admin@vinalax.com' });
-    if (checkAdmin) return res.status(400).json({ message: 'Admin profile already seeded.' });
-
-    // Hash the password securely using bcrypt before writing to the database
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash('admin123', salt);
-
-    const newAdmin = new Admin({
-      email: 'admin@vinalax.com',
-      password: hashedPassword
-    });
-
-    await newAdmin.save();
-    res.status(201).json({ message: 'Secure Admin profile created successfully!' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+// Health check for PM2/nginx/load-balancer checks (does not touch the database).
+app.get('/api/health', (req, res) => {
+  res.json({ success: true, service: 'vinalax-website-backend', db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected' });
 });
 
 // LOGIN AUTHENTICATION ROUTE (Checks credentials, issues signed JWT pass)
@@ -213,7 +200,26 @@ async function proxyToHR(req, res, hrPath) {
 }
 
 // Login (company or employee — the HR system tells us which via the returned user.role)
-app.post('/api/client/login', (req, res) => proxyToHR(req, res, '/auth/login'));
+// Only company and employee accounts may sign in through the public website;
+// HR admin/manager accounts must use the HR software itself.
+const CLIENT_ROLES = ['COMPANY', 'EMPLOYEE'];
+app.post('/api/client/login', async (req, res) => {
+  try {
+    const upstream = await fetch(`${HR_API_BASE_URL}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body || {})
+    });
+    const data = await upstream.json().catch(() => ({ success: false, message: 'Unexpected response from the HR system.' }));
+    if (upstream.ok && data.user && !CLIENT_ROLES.includes(data.user.role)) {
+      return res.status(403).json({ success: false, message: 'This account cannot use the client portal. Please sign in to the HR software instead.' });
+    }
+    res.status(upstream.status).json(data);
+  } catch (error) {
+    console.error('[client login] Could not reach HR system:', error.message);
+    res.status(502).json({ success: false, message: 'Could not reach the HR system. Please try again shortly.' });
+  }
+});
 app.get('/api/client/me', (req, res) => proxyToHR(req, res, '/auth/me'));
 app.put('/api/client/change-password', (req, res) => proxyToHR(req, res, '/auth/change-password'));
 
@@ -233,32 +239,32 @@ app.get('/api/client/company/reports/bank', (req, res) => proxyToHR(req, res, '/
 app.get('/api/client/employee/payslips/:payslipId/pdf', (req, res) => proxyToHR(req, res, `/payslips/my/${req.params.payslipId}/pdf`));
 app.get('/api/client/employee/payslips', (req, res) => proxyToHR(req, res, '/payslips/my'));
 
-// ── 5. START ACTIVE ENGINE LISTENER WITH AUTOMATIC PROFILE SEEDING ──
-const PORT = process.env.PORT || 5001;
+// ── 5. START SERVER ──
+const PORT = process.env.PORT || 5002;
 
 app.listen(PORT, async () => {
-  console.log(`🚀 Vinalax JWT-Core Server running perfectly on port ${PORT}`);
-  
+  console.log(`🚀 Vinalax website backend running on port ${PORT}`);
+
+  // Website admin seeding. The password is never hard-coded and existing
+  // passwords are left alone unless ADMIN_RESET_PASSWORD=true is set once.
   try {
-    const adminEmail = 'admin@vinalax.com';
-    let admin = await Admin.findOne({ email: adminEmail });
-    
-    // Create clean, consistent hashing for standard deployment login
-    const salt = await bcrypt.genSalt(10);
-    const correctHash = await bcrypt.hash('admin123', salt);
+    const adminEmail = (process.env.ADMIN_EMAIL || 'admin@vinalax.com').trim().toLowerCase();
+    const adminPassword = process.env.ADMIN_PASSWORD;
+    const admin = await Admin.findOne({ email: adminEmail });
 
     if (!admin) {
-      // Create admin user dynamically if the collection is completely clean
-      admin = new Admin({ email: adminEmail, password: correctHash });
+      if (!adminPassword || adminPassword.length < 10) {
+        console.warn('⚠️ No website admin exists. Set ADMIN_PASSWORD (10+ characters) in .env and restart to create one.');
+        return;
+      }
+      await Admin.create({ email: adminEmail, password: await bcrypt.hash(adminPassword, 10) });
+      console.log(`⭐ Website admin ${adminEmail} created.`);
+    } else if (process.env.ADMIN_RESET_PASSWORD === 'true' && adminPassword && adminPassword.length >= 10) {
+      admin.password = await bcrypt.hash(adminPassword, 10);
       await admin.save();
-      console.log('⭐ Database Lifecycle: Initial Admin user dynamically configured in Atlas cluster!');
-    } else {
-      // Force correction step if previous database attempts stored corrupted hashes
-      admin.password = correctHash;
-      await admin.save();
-      console.log('⭐ Database Lifecycle: Existing Admin authentication hashes successfully validated!');
+      console.log(`⭐ Website admin ${adminEmail} password reset. Remove ADMIN_RESET_PASSWORD from .env now.`);
     }
   } catch (syncError) {
-    console.error('⚠️ Database Lifecycle Warning: Could not complete startup profile setup:', syncError.message);
+    console.error('⚠️ Could not complete website admin setup:', syncError.message);
   }
 });

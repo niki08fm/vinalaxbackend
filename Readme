@@ -1,5 +1,13 @@
-to run in local host need to chnage the app.cors origin : to local host frontend url
-PORT
-MONGO_URI
-JWT_SECRET
-env containtain above keys
+Vinalax website backend (Express + MongoDB)
+
+- Website enquiries and website admin login (MongoDB).
+- /api/client/* : client portal. Companies and employees sign in with the login
+  the HR software admin created for them (HR software -> Employee Access). This service
+  only forwards those requests to the HR software API (HR_API_BASE_URL).
+
+Local run:
+  cp .env.example .env    # fill in values
+  npm ci
+  npm start               # http://localhost:5002/api/health
+
+Production (AWS EC2, same server as the HR software): see DEPLOY-AWS.md
